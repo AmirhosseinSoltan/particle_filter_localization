@@ -6,8 +6,6 @@ from nav_msgs.msg import OccupancyGrid
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
 
-import helpers.tf_helpers as tf_helpers
-
 
 class ParticleFilterLocalization(Node):
     def __init__(self,
@@ -74,8 +72,8 @@ class ParticleFilterLocalization(Node):
             self.PARTICLE_ARRAY_TOPIC,
             10) if init_ros else None
 
-        self.tf_buffer = tf2_ros.Buffer()
-        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+        self.tf_buffer = tf2_ros.Buffer() if init_ros else None
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self) if init_ros else None
 
         return None
 
@@ -101,7 +99,15 @@ class ParticleFilterLocalization(Node):
     def scan_callback(self, msg: LaserScan) -> None:
 
         if not self.lidar_init:
-            self.scanner_info = tf_helpers.extract_scanner_info(msg)
+
+            self.scanner_info.update({
+                "frame_id" : msg.header.frame_id,
+                "angle_min" : msg.angle_min,
+                "angle_max" : msg.angle_max,
+                "range_min" : msg.range_min,
+                "range_max" : msg.range_max,
+                "angle_increment" : msg.angle_increment,
+                })
 
             self.tf_lidar_wrt_robot: TransformStamped = self.tf_buffer.lookup_transform(
                                                     self.ROBOT_FRAME, self.SCANNER_FRAME, rclpy.time.Time())
@@ -120,15 +126,17 @@ class ParticleFilterLocalization(Node):
         # Update position of particles
         particles[:, 0] += (self.control_input[0] * np.cos(particles[:, 2]) \
                         + self.control_input[1] * np.sin(particles[:, 2])) \
-                        * time_delta + np.random.normal(self.ERROR_MEAN, self.ERROR_LINEAR_STD)
+                        * time_delta \
+                        + np.random.normal(self.ERROR_MEAN, self.ERROR_LINEAR_STD, self.NUM_PARTICLES)
 
         particles[:, 1] += (self.control_input[1] * np.cos(particles[:, 2]) \
                         + self.control_input[0] * np.sin(particles[:, 2])) \
-                        * time_delta + np.random.normal(self.ERROR_MEAN, self.ERROR_LINEAR_STD)
+                        * time_delta \
+                        + np.random.normal(self.ERROR_MEAN, self.ERROR_LINEAR_STD, self.NUM_PARTICLES)
 
         # Update heading of particles
         particles[:, 2] += self.control_input[2] * time_delta \
-                            + np.random.normal(self.ERROR_MEAN, self.ERROR_ANGULAR_STD)
+                        + np.random.normal(self.ERROR_MEAN, self.ERROR_ANGULAR_STD, self.NUM_PARTICLES)
 
         return particles
 
