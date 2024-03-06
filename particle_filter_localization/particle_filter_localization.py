@@ -78,8 +78,6 @@ class ParticleFilterLocalization(Node):
         # LIDAR params
         self.variance = 1
 
-        return None
-
 
     def cmd_vel_callback(self, msg: Twist) -> None:
         """
