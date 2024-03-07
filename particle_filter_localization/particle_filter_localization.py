@@ -14,6 +14,9 @@ class ParticleFilterLocalization(Node):
         # For testing
         init_ros = False
 
+        # Flag to initialize sampler
+        self.initializer = True
+
         # Constants
         self.POSITION_DIMENSIONS = 2
         self.ORIENTATION_DIMENSIONS = 1
@@ -111,6 +114,26 @@ class ParticleFilterLocalization(Node):
         return None
 
 
+    def sampler_initilizer (self) -> None:
+
+        if self.initializer:
+            x = np.linspace(0.0,self.width,num=round(self.width/self.resolution))
+            y = np.linspace(0.0 , self.height, num= round(self.height/self.resolution))
+
+            nx,ny = np.meshgrid(x,y)
+            grid_points = np.dstack((nx,ny))
+            shape = np.shape(grid_points)
+            samples = grid_points.reshape(shape[0]*shape[1],2)
+
+            theta = np.linspace(-np.pi,np.pi,num=shape[0]*shape[1])
+            theta = theta[np.newaxis].T
+
+            self.samples = np.hstack((samples,theta))
+
+        self.initializer = False  
+
+        return None
+    
     def scan_callback(self, msg: LaserScan) -> None:
 
         if not self.lidar_init:
