@@ -58,6 +58,7 @@ class ParticleFilterLocalization(Node):
             qos_profile=rclpy.qos.qos_profile_sensor_data,
             ) if init_ros else None
 
+        #scan subscriber
         self.scan_subscriber = self.create_subscription(
             LaserScan,
             self.SCAN_TOPIC,
@@ -93,6 +94,17 @@ class ParticleFilterLocalization(Node):
 
 
     def map_callback(self, msg: OccupancyGrid) -> None:
+        self.get_logger().info(f'I am recieving the map...')
+
+        self.map = msg.data
+        self.width = msg.info.width
+        self.height = msg.info.height
+        self.resolution = msg.info.resolution
+
+        self.get_logger().info(f'Map width is: {self.width} height is: {self.height} Resolution is {self.resolution}')
+
+        # Converting the map to a 2D array
+        self.state = np.reshape(self.map,(self.width,self.height),order='F')
 
         return None
 
