@@ -1,11 +1,11 @@
 import numpy as np
 import rclpy
 import tf2_ros
-from geometry_msgs.msg import PoseArray, TransformStamped, Twist
+from geometry_msgs.msg import PoseArray, TransformStamped, Twist, PoseStamped
 from nav_msgs.msg import OccupancyGrid
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
-
+from tf_transformations import quaternion_from_euler
 
 class ParticleFilterLocalization(Node):
     def __init__(self,
@@ -29,10 +29,11 @@ class ParticleFilterLocalization(Node):
         self.MAP_TOPIC = "map"
         self.SCAN_TOPIC = "scan"
         self.PARTICLE_ARRAY_TOPIC = "particle_cloud"
-
+        self.ESTIMATED_PARTICLE = "pose_estimated"
         self.ROBOT_FRAME = "base_link"
         self.MAP_FRAME = "map"
         self.SCANNER_FRAME = "base_laser_front_link"
+        
 
         # Input
         self.control_input = np.zeros((self.POSITION_DIMENSIONS + \
@@ -42,7 +43,23 @@ class ParticleFilterLocalization(Node):
         self.particles = np.zeros((self.NUM_PARTICLES, \
                                    self.POSITION_DIMENSIONS + self.ORIENTATION_DIMENSIONS + self.WEIGHT_DIMENSION))
 
+        #time delta
+        self.time_delta = 1.0
+
+         # LIDAR params
+        self.variance = 1
+        self.step = 1
+
+        # expected pose
+        self.expected_pose = self.set_posestamped(
+                        PoseStamped(),
+                        [0.0, 0.0, 0.0], 
+                        [0.0, 0.0, 0.0],
+                        self.ROBOT_FRAME
+                        )
+
         # Setup subscribers and publishers
+        
         # Command input subscriber
         self.cmd_vel_subscriber = self.create_subscription(
             Twist,
@@ -59,7 +76,7 @@ class ParticleFilterLocalization(Node):
             qos_profile=rclpy.qos.qos_profile_sensor_data,
             ) if init_ros else None
 
-        #scan subscriber
+        # scan subscriber
         self.scan_subscriber = self.create_subscription(
             LaserScan,
             self.SCAN_TOPIC,
@@ -74,13 +91,13 @@ class ParticleFilterLocalization(Node):
             self.PARTICLE_ARRAY_TOPIC,
             10) if init_ros else None
 
+        self.estimated_pose_publisher = self.create_publisher(PoseStamped,
+                                                              self.ESTIMATED_PARTICLE,
+                                                              10)
+        
         self.tf_buffer = tf2_ros.Buffer() if init_ros else None
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self) if init_ros else None
-
-        # LIDAR params
-        self.variance = 1
-        self.step = 1
-
+ 
 
     def cmd_vel_callback(self, msg: Twist) -> None:
         """
@@ -133,7 +150,28 @@ class ParticleFilterLocalization(Node):
             self.get_logger().info(f"LiDAR parameters initialized")
 
         return None
+    
+    def set_posestamped(self, pose:PoseStamped, position, orientation_euler, frame_id):
+        '''
+        Sets the fields of a PoseStamped object
+        '''
+        pose.header.frame_id = frame_id
+        
+        pose.pose.position.x = position[0]
+        pose.pose.position.y = position[1]
+        pose.pose.position.z = position[2]
 
+        orientation_quat = quaternion_from_euler(*orientation_euler)
+
+        pose.pose.orientation.x = orientation_quat[0]
+        pose.pose.orientation.y = orientation_quat[1]
+        pose.pose.orientation.z = orientation_quat[2]
+        pose.pose.orientation.w = orientation_quat[3]
+
+        if self.verbose:
+            self.get_logger().info(f"pose set: {pose}")
+
+        return pose
 
     def motion_model_prediction(self,
                                 particles: np.ndarray,
@@ -227,8 +265,27 @@ class ParticleFilterLocalization(Node):
         ''' call for laser scan 
             convert it into cartesion                           
             call sampling method '''
+        x_est = 0.0
+        y_est = 0.0
+        theta_est = 0.0 
+            
         
+        while np.allclose(self.variance,0):
 
+            self.particles = self.motion_model_prediction(self.particles,self.time_delta)
+            self.particles = self.measurement_model_correspondance(self.particles,self.state)
+            # TODO: call sampling 
+            
+            for particle in self.particles:
+                x_est += particle[0] * particle[3]
+                y_est += particle[1] * particle[3]
+                theta_est += particle[2] * particle[3]
+
+            self.variance = np.var(self.particles[3])
+
+        self.estimated_pose_publisher(self.set_posestamped(self.expected_pose,[x_est,y_est,0.0],[0.0, 0.0, theta_est],self.ROBOT_FRAME))
+
+            
         return None
 
 
