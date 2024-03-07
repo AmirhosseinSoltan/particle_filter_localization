@@ -13,6 +13,7 @@ class ParticleFilterLocalization(Node):
                  ) -> None:
         # For testing
         init_ros = False
+        self.verbose = True
 
         # Flag to initialize sampler
         self.initializer = True
@@ -59,7 +60,7 @@ class ParticleFilterLocalization(Node):
                         [0.0, 0.0, 0.0], 
                         [0.0, 0.0, 0.0],
                         self.ROBOT_FRAME
-                        )
+                        ) if init_ros else None
 
         # Setup subscribers and publishers
         
@@ -96,10 +97,12 @@ class ParticleFilterLocalization(Node):
 
         self.estimated_pose_publisher = self.create_publisher(PoseStamped,
                                                               self.ESTIMATED_PARTICLE,
-                                                              10)
+                                                              10) if init_ros else None
         
         self.tf_buffer = tf2_ros.Buffer() if init_ros else None
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self) if init_ros else None
+
+        self.sampler_initilizer()
  
 
     def cmd_vel_callback(self, msg: Twist) -> None:
@@ -145,7 +148,7 @@ class ParticleFilterLocalization(Node):
             theta = np.linspace(-np.pi,np.pi,num=shape[0]*shape[1])
             theta = theta[np.newaxis].T
 
-            self.samples = np.hstack((samples,theta))
+            self.particles[:,-1] = np.hstack((samples,theta))
 
         self.initializer = False  
 
@@ -280,6 +283,9 @@ class ParticleFilterLocalization(Node):
 
         return measurements
 
+    def resampling():
+
+        return None
 
         
 
