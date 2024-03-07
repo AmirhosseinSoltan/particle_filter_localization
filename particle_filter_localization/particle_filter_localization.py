@@ -163,14 +163,15 @@ class ParticleFilterLocalization(Node):
                                          ) -> np.ndarray:
 
 
-        for i, particle in enumerate(self.particles):
+        for i, particle in enumerate(particles):
             # Implement measurement likelihood calculation based on LiDAR measurements
             # Update particle weight
            likelihood = self.measurement_likelihood(self.scanner_info.get('range_data'), particle, map)
            particle[3] *= likelihood
 
-        self.particles[:,3] = self.particles[:,3] / np.sum(self.particles[:,3])
-        return None
+        particles[:,3] = particles[:,3] / np.sum(particles[:,3])
+        
+        return particles
     
     def measurement_likelihood(self, measurements, particle, map):
 
