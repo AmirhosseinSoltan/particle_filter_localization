@@ -17,6 +17,7 @@ class ParticleFilterLocalization(Node):
         # Constants
         self.POSITION_DIMENSIONS = 2
         self.ORIENTATION_DIMENSIONS = 1
+        self.WEIGHT_DIMENSION = 1
         self.NUM_PARTICLES = particle_count
 
         # Random
@@ -39,7 +40,7 @@ class ParticleFilterLocalization(Node):
 
         # Particles
         self.particles = np.zeros((self.NUM_PARTICLES, \
-                                   self.POSITION_DIMENSIONS + self.ORIENTATION_DIMENSIONS))
+                                   self.POSITION_DIMENSIONS + self.ORIENTATION_DIMENSIONS + self.WEIGHT_DIMENSION))
 
         # Setup subscribers and publishers
         # Command input subscriber
@@ -77,6 +78,7 @@ class ParticleFilterLocalization(Node):
 
         # LIDAR params
         self.variance = 1
+        self.step = 1
 
 
     def cmd_vel_callback(self, msg: Twist) -> None:
@@ -93,6 +95,7 @@ class ParticleFilterLocalization(Node):
 
 
     def map_callback(self, msg: OccupancyGrid) -> None:
+        
 
         return None
 
@@ -148,25 +151,27 @@ class ParticleFilterLocalization(Node):
                                          map: np.ndarray,
                                          ) -> np.ndarray:
 
-        weights: np.ndarray = np.zeros(particles.shape[0])
 
         for i, particle in enumerate(self.particles):
             # Implement measurement likelihood calculation based on LiDAR measurements
             # Update particle weight
-           weights[i] = self.measurement_likelihood(self.scanner_info.get('range_data'), particle, map)
+           likelihood = self.measurement_likelihood(self.scanner_info.get('range_data'), particle, map)
+           particle[3] *= likelihood
 
-        return weights
+        self.particles[:,3] = self.particles[:,3] / np.sum(self.particles[:,3])
+        return None
     
     def measurement_likelihood(self, measurements, particle, map):
-        likelihood = 1.0
-        for expected_measurement in self.simulation_lidar_measurement(particle, map):
+
+        expected_measurement = self.simulation_lidar_measurement(particle, map)
             # Assuming Gaussian noise for simplicity
-            measurement_difference = measurements - expected_measurement
-            measurement_probability = (
-                1.0 / np.sqrt(2 * np.pi * self.variance) * np.exp(-0.5 * (measurement_difference / self.variance) ** 2)
-            )
-            likelihood *= measurement_probability
-        return likelihood
+        measurement_difference = np.sum(np.square(measurements - expected_measurement))/np.size(measurements)
+
+        measurement_probability = (
+            1.0 / np.sqrt(2 * np.pi * self.variance) * np.exp(-0.5 * (measurement_difference / self.variance) ** 2)
+        )
+    
+        return measurement_probability
 
 
     def simulation_lidar_measurement(self,particle, map_data):
@@ -179,7 +184,7 @@ class ParticleFilterLocalization(Node):
         for angle in angles:
             x = particle[0]
             y = particle[1]
-            theta = particle[2] + angle  # Adjust for sensor orientation
+            theta = particle[2] + angle  # TODO: Don't know abouit; Adjust for sensor orientation
             max_range = self.scanner_info.get('range_max')
             min_range = self.scanner_info.get('range_min')
 
@@ -190,8 +195,9 @@ class ParticleFilterLocalization(Node):
                     distance = np.sqrt((x - particle[0])**2 + (y - particle[1])**2)
                     measurements.append(min(distance, max_range))
                     break
-                x += min_range* np.cos(theta)
-                y += min_range * np.sin(theta)
+                
+                x += self.step * np.cos(theta)
+                y += self.step * np.sin(theta)
 
             # If no obstacle is hit within the sensor's range, set measurement to max range
             if 0 <= x < map_data.shape[0] and 0 <= y < map_data.shape[1]:
@@ -209,7 +215,8 @@ class ParticleFilterLocalization(Node):
         ''' call for laser scan 
             convert it into cartesion                           
             call sampling method '''
-        pass
+        
+
         return None
 
 
