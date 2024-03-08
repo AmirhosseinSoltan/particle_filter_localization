@@ -24,6 +24,7 @@ class ParticleFilterLocalization(Node):
         self.WEIGHT_DIMENSION = 1
         self.NUM_PARTICLES = particle_count
 
+        
         # Random
         self.ERROR_MEAN = 0
         self.ERROR_LINEAR_STD = 0.5
@@ -80,6 +81,9 @@ class ParticleFilterLocalization(Node):
             qos_profile=rclpy.qos.qos_profile_sensor_data,
             ) if init_ros else None
 
+        self.width = None
+        self.height = None
+       
         # scan subscriber
         self.scan_subscriber = self.create_subscription(
             LaserScan,
@@ -151,7 +155,7 @@ class ParticleFilterLocalization(Node):
 
             samples = np.vstack((x,y,theta)).T
             
-            self.particles[:,-1] = samples
+            self.particles[:,:-1] = samples
 
         self.initializer = False  
 
