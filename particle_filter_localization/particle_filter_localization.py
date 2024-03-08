@@ -1,7 +1,7 @@
 import numpy as np
 import rclpy
 import tf2_ros
-from geometry_msgs.msg import PoseArray, TransformStamped, Twist, PoseStamped
+from geometry_msgs.msg import PoseArray, TransformStamped, Twist, PoseStamped, Pose
 from nav_msgs.msg import OccupancyGrid
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
@@ -35,6 +35,7 @@ class ParticleFilterLocalization(Node):
         self.PARTICLE_ARRAY_TOPIC = "particle_cloud"
         self.ESTIMATED_PARTICLE = "pose_estimated"
         self.ROBOT_FRAME = "base_link"
+        self.ODOM = "odom"
         self.MAP_FRAME = "map"
         self.SCANNER_FRAME = "base_laser_front_link"
         
@@ -46,6 +47,8 @@ class ParticleFilterLocalization(Node):
         # Particles
         self.particles = np.zeros((self.NUM_PARTICLES, \
                                    self.POSITION_DIMENSIONS + self.ORIENTATION_DIMENSIONS + self.WEIGHT_DIMENSION))
+        
+        self.origin = Pose()
 
         #time delta
         self.time_delta = 1.0
@@ -125,6 +128,7 @@ class ParticleFilterLocalization(Node):
         self.width = msg.info.width
         self.height = msg.info.height
         self.resolution = msg.info.resolution
+        self.origin = msg.info.origin
 
         self.get_logger().info(f'Map width is: {self.width} height is: {self.height} Resolution is {self.resolution}')
 
@@ -249,6 +253,30 @@ class ParticleFilterLocalization(Node):
     
         return measurement_probability
 
+    def particle_array_generation(self):
+
+        particle_array = PoseArray()
+        particle_array.header.frame_id = self.ODOM
+        for particle in self.particle_array:
+            pose = Pose()
+            pose.position.x = particle[0] * self.resolution + self.origin.position.x
+            pose.position.y = particle[1] * self.resolution + self.origin.position.y
+            pose.position.z = particle[2] * self.resolution + self.origin.position.z
+
+            orientation_quat = quaternion_from_euler(*[0.0,0.0,particle[2]])
+
+            pose.pose.orientation.x = orientation_quat[0]
+            pose.pose.orientation.y = orientation_quat[1]
+            pose.pose.orientation.z = orientation_quat[2]
+            pose.pose.orientation.w = orientation_quat[3]
+
+            particle_array.poses.insert(pose)
+
+        if self.verbose:
+            self.get_logger().info(f"pose array set: {particle_array}")
+        
+        self.particle_array_publisher.publish(particle_array)
+
 
     def simulation_lidar_measurement(self,particle, map_data):
 
@@ -313,6 +341,7 @@ class ParticleFilterLocalization(Node):
             self.variance = np.var(self.particles[3])
 
         self.estimated_pose_publisher(self.set_posestamped(self.expected_pose,[x_est,y_est,0.0],[0.0, 0.0, theta_est],self.ROBOT_FRAME))
+        self.particle_array_generation()
 
             
         return None
