@@ -5,7 +5,8 @@ from geometry_msgs.msg import PoseArray, TransformStamped, Twist, PoseStamped, P
 from nav_msgs.msg import OccupancyGrid
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
-from tf_transformations import quaternion_from_euler
+import tf_transformations as tf
+# from tf_transformations import quaternion_from_euler
 
 class ParticleFilterLocalization(Node):
     def __init__(self,
@@ -198,7 +199,7 @@ class ParticleFilterLocalization(Node):
         pose.pose.position.y = position[1]
         pose.pose.position.z = position[2]
 
-        orientation_quat = quaternion_from_euler(*orientation_euler)
+        orientation_quat = tf.quaternion_from_euler(*orientation_euler)
 
         pose.pose.orientation.x = orientation_quat[0]
         pose.pose.orientation.y = orientation_quat[1]
@@ -318,10 +319,13 @@ class ParticleFilterLocalization(Node):
 
         return measurements
 
-    def resampling():
+    def resampling(self):
 
+        indices = np.random.choice(range(self.NUM_PARTICLES),self.NUM_PARTICLES, p = self.particles[:,-1])
+        self.particles = self.particles[indices]
+        self.particles[:,-1] = 1/self.NUM_PARTICLES
+    
         return None
-
         
 
     def localization_loop(self) -> None:
