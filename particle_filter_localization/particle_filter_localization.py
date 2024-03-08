@@ -6,7 +6,7 @@ from nav_msgs.msg import OccupancyGrid
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
 import tf_transformations as tf
-# from tf_transformations import quaternion_from_euler
+from tf_transformations import quaternion_from_euler
 
 class ParticleFilterLocalization(Node):
     def __init__(self,
