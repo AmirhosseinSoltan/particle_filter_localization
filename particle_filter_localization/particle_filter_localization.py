@@ -24,6 +24,7 @@ class ParticleFilterLocalization(Node):
         self.WEIGHT_DIMENSION = 1
         self.NUM_PARTICLES = particle_count
 
+        
         # Random
         self.ERROR_MEAN = 0
         self.ERROR_LINEAR_STD = 0.5
@@ -83,6 +84,9 @@ class ParticleFilterLocalization(Node):
             qos_profile=rclpy.qos.qos_profile_sensor_data,
             ) if init_ros else None
 
+        self.width = None
+        self.height = None
+       
         # scan subscriber
         self.scan_subscriber = self.create_subscription(
             LaserScan,
@@ -141,18 +145,21 @@ class ParticleFilterLocalization(Node):
     def sampler_initilizer (self) -> None:
 
         if self.initializer:
-            x = np.linspace(0.0,self.width,num=round(self.width/self.resolution))
-            y = np.linspace(0.0 , self.height, num= round(self.height/self.resolution))
+            # x = np.linspace(0.0,self.width,num=round(self.width/self.resolution))
+            # y = np.linspace(0.0 , self.height, num= round(self.height/self.resolution))
+            # nx,ny = np.meshgrid(x,y)
+            # grid_points = np.dstack((nx,ny))
+            # shape = np.shape(grid_points)
+            # samples = grid_points.reshape(shape[0]*shape[1],2)
+            # theta = theta[np.newaxis].T
 
-            nx,ny = np.meshgrid(x,y)
-            grid_points = np.dstack((nx,ny))
-            shape = np.shape(grid_points)
-            samples = grid_points.reshape(shape[0]*shape[1],2)
+            x = np.random.uniform(0.0,self.width,self.NUM_PARTICLES)
+            y = np.random.uniform(0.0,self.height,self.NUM_PARTICLES)
+            theta = np.random.uniform(-np.pi,np.pi,size=self.NUM_PARTICLES)
 
-            theta = np.linspace(-np.pi,np.pi,num=shape[0]*shape[1])
-            theta = theta[np.newaxis].T
-
-            self.particles[:,-1] = np.hstack((samples,theta))
+            samples = np.vstack((x,y,theta)).T
+            
+            self.particles[:,:-1] = samples
 
         self.initializer = False  
 
