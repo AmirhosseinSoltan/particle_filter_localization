@@ -11,9 +11,11 @@ class ParticleFilterLocalization(Node):
     def __init__(self,
                  particle_count: int = 1000,
                  ) -> None:
+        super().__init__(node_name="ParticleFilterLocalization")
         # For testing
-        init_ros = False
+        init_ros = True
         self.verbose = True
+        self.lidar_init = False
 
         # Flag to initialize sampler
         self.initializer = True
@@ -30,11 +32,11 @@ class ParticleFilterLocalization(Node):
         self.ERROR_LINEAR_STD = 0.5
         self.ERROR_ANGULAR_STD = 0.5
 
-        self.CMD_VEL_TOPIC = "cmd_vel"
-        self.MAP_TOPIC = "map"
-        self.SCAN_TOPIC = "scan"
-        self.PARTICLE_ARRAY_TOPIC = "particle_cloud"
-        self.ESTIMATED_PARTICLE = "pose_estimated"
+        self.CMD_VEL_TOPIC = "/cmd_vel"
+        self.MAP_TOPIC = "/map_loaded"
+        self.SCAN_TOPIC = "/scan"
+        self.PARTICLE_ARRAY_TOPIC = "/particle_cloud"
+        self.ESTIMATED_PARTICLE = "/pose_estimated"
         self.ROBOT_FRAME = "base_link"
         self.ODOM = "odom"
         self.MAP_FRAME = "map"
@@ -55,8 +57,8 @@ class ParticleFilterLocalization(Node):
         self.time_delta = 1.0
 
          # LIDAR params
-        self.variance = 1
-        self.step = 1
+        self.variance = 1.0
+        self.step = 1.0
 
         # expected pose
         self.expected_pose = self.set_posestamped(
@@ -64,7 +66,7 @@ class ParticleFilterLocalization(Node):
                         [0.0, 0.0, 0.0], 
                         [0.0, 0.0, 0.0],
                         self.ROBOT_FRAME
-                        ) if init_ros else None
+                        )
 
         # Setup subscribers and publishers
         
@@ -77,11 +79,13 @@ class ParticleFilterLocalization(Node):
             ) if init_ros else None
 
         # Map subscriber
+        self.get_logger().info(f'Trying to load map subscriber..')
         self.map_subscriber = self.create_subscription(
             OccupancyGrid,
             self.MAP_TOPIC,
             self.map_callback,
-            qos_profile=rclpy.qos.qos_profile_sensor_data,
+            10
+            # qos_profile=rclpy.qos.qos_profile_sensor_data,
             ) if init_ros else None
 
         self.width = None
@@ -94,7 +98,8 @@ class ParticleFilterLocalization(Node):
             self.scan_callback,
             10,
             ) if init_ros else None
-        self.scanner_info: dict
+        
+        self.scanner_info = {}
 
         # Particle publisher (for display in RViz)
         self.particle_array_publisher = self.create_publisher(
@@ -109,14 +114,17 @@ class ParticleFilterLocalization(Node):
         self.tf_buffer = tf2_ros.Buffer() if init_ros else None
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self) if init_ros else None
 
-        self.sampler_initilizer()
+        self.control_step = 1.0
+        self.map_received = False
+       
+
+       
  
 
     def cmd_vel_callback(self, msg: Twist) -> None:
         """
         Extract linear and angular velocity from cmd_vel message
         """
-
         self.control_input[0] = msg.linear.x
         self.control_input[1] = msg.linear.y
 
@@ -139,6 +147,10 @@ class ParticleFilterLocalization(Node):
         # Converting the map to a 2D array
         self.state = np.reshape(self.map,(self.width,self.height),order='F')
 
+        self.sampler_initilizer()
+        self.map_received = True
+        timer = self.create_timer(self.control_step, self.localization_loop)
+
         return None
 
 
@@ -160,6 +172,9 @@ class ParticleFilterLocalization(Node):
             samples = np.vstack((x,y,theta)).T
             
             self.particles[:,:-1] = samples
+        
+        if self.verbose:
+            self.get_logger().info(f'Sample particles initialized.......')
 
         self.initializer = False  
 
@@ -229,6 +244,9 @@ class ParticleFilterLocalization(Node):
         particles[:, 2] += self.control_input[2] * time_delta \
                         + np.random.normal(self.ERROR_MEAN, self.ERROR_ANGULAR_STD, self.NUM_PARTICLES)
 
+        if self.verbose:
+            self.get_logger().info(f'Motion model running.......')
+
         return particles
 
 
@@ -245,6 +263,9 @@ class ParticleFilterLocalization(Node):
            particle[3] *= likelihood
 
         particles[:,3] = particles[:,3] / np.sum(particles[:,3])
+
+        if self.verbose:
+            self.get_logger().info(f'Measurement model running.......')
         
         return particles
     
@@ -258,9 +279,14 @@ class ParticleFilterLocalization(Node):
             1.0 / np.sqrt(2 * np.pi * self.variance) * np.exp(-0.5 * (measurement_difference / self.variance) ** 2)
         )
     
+        if self.verbose:
+            self.get_logger().info(f'Measurement Likelihood running.......')
         return measurement_probability
 
     def particle_array_generation(self):
+
+        if self.verbose:
+            self.get_logger().info(f'Particle array getting generated.....')
 
         particle_array = PoseArray()
         particle_array.header.frame_id = self.ODOM
@@ -332,23 +358,36 @@ class ParticleFilterLocalization(Node):
         x_est = 0.0
         y_est = 0.0
         theta_est = 0.0 
+        if self.verbose:
+            self.get_logger().info(f'Localization loop running')
             
-        
-        while np.allclose(self.variance,0):
+        try: 
+            if self.verbose:
+                varaince_diff = np.isclose(self.variance,0.0,0.1,0.2)
+                self.get_logger().info(f'In try loop with variance: {varaince_diff}')
+            while not np.isclose(self.variance,0.0,0.1,0.2):
 
-            self.particles = self.motion_model_prediction(self.particles,self.time_delta)
-            self.particles = self.measurement_model_correspondance(self.particles,self.state)
-            # TODO: call sampling 
+                if self.verbose:
+                    self.get_logger().info(f'Particle loop running')
+
+                self.particles = self.motion_model_prediction(self.particles,self.time_delta)
+                self.particles = self.measurement_model_correspondance(self.particles,self.state)
+                
+                
+                for particle in self.particles:
+                    x_est += particle[0] * particle[3]
+                    y_est += particle[1] * particle[3]
+                    theta_est += particle[2] * particle[3]
+
+                self.variance = np.var(self.particles[:,3])
             
-            for particle in self.particles:
-                x_est += particle[0] * particle[3]
-                y_est += particle[1] * particle[3]
-                theta_est += particle[2] * particle[3]
+            if self.verbose:
+                self.get_logger().info(f'Publishing estimated pose.....')
+            self.estimated_pose_publisher(self.set_posestamped(self.expected_pose,[x_est,y_est,0.0],[0.0, 0.0, theta_est],self.ROBOT_FRAME))
+            self.particle_array_generation()
 
-            self.variance = np.var(self.particles[3])
-
-        self.estimated_pose_publisher(self.set_posestamped(self.expected_pose,[x_est,y_est,0.0],[0.0, 0.0, theta_est],self.ROBOT_FRAME))
-        self.particle_array_generation()
+        except Exception as e:
+            self.get_logger().debug(f'Exception received while running localization: {e}')
 
             
         return None
@@ -359,15 +398,17 @@ def main(args=None):
     rclpy.init(args=args)
 
     node = ParticleFilterLocalization()
+    rclpy.spin(node)
+    rclpy.shutdown()
 
-    try:
-        while rclpy.ok():
-            rclpy.spin_once(node)
+    # try:
+    #     while rclpy.ok():
+    #         rclpy.spin_once(node)
 
-    except Exception as e:
-        print(e)
+    # except Exception as e:
+    #     print(e)
 
-        rclpy.shutdown()
+    #     rclpy.shutdown()
 
 
 if __name__ == '__main__':
