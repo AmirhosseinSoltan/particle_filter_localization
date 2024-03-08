@@ -80,7 +80,7 @@ class ParticleFilterLocalization(Node):
             ) if init_ros else None
 
         # Map subscriber
-        self.get_logger().info(f'Trying to load map subscriber..')
+        self.map = None
         self.map_subscriber = self.create_subscription(
             OccupancyGrid,
             self.MAP_TOPIC,
@@ -112,11 +112,12 @@ class ParticleFilterLocalization(Node):
                                                               self.ESTIMATED_PARTICLE,
                                                               10) if init_ros else None
         
+        # TODO:transform the points
         self.tf_buffer = tf2_ros.Buffer() if init_ros else None
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self) if init_ros else None
 
-        self.control_step = 1.0
-        self.map_received = False
+        self.control_step = 10
+        timer = self.create_timer(self.control_step, self.localization_loop)
        
 
        
@@ -149,8 +150,7 @@ class ParticleFilterLocalization(Node):
         self.state = np.reshape(self.map,(self.width,self.height),order='F')
 
         self.sampler_initilizer()
-        self.map_received = True
-        timer = self.create_timer(self.control_step, self.localization_loop)
+        
 
         return None
 
@@ -173,6 +173,7 @@ class ParticleFilterLocalization(Node):
             samples = np.vstack((x,y,theta)).T
             
             self.particles[:,:-1] = samples
+            self.particles[:,-1] = 1/self.NUM_PARTICLES
         
         if self.verbose:
             self.get_logger().info(f'Sample particles initialized.......')
@@ -246,7 +247,7 @@ class ParticleFilterLocalization(Node):
                         + np.random.normal(self.ERROR_MEAN, self.ERROR_ANGULAR_STD, self.NUM_PARTICLES)
 
         if self.verbose:
-            self.get_logger().info(f'Motion model running.......')
+            self.get_logger().info(f'Motion model running.......{particles}')
 
         return particles
 
@@ -272,16 +273,15 @@ class ParticleFilterLocalization(Node):
     
     def measurement_likelihood(self, measurements, particle, map):
 
-        expected_measurement = self.simulation_lidar_measurement(particle, map)
+        expected_measurement = np.array(self.simulation_lidar_measurement(particle, map))
             # Assuming Gaussian noise for simplicity
         measurement_difference = np.sum(np.square(measurements - expected_measurement))/np.size(measurements)
 
         measurement_probability = (
             1.0 / np.sqrt(2 * np.pi * self.variance) * np.exp(-0.5 * (measurement_difference / self.variance) ** 2)
         )
-    
         if self.verbose:
-            self.get_logger().info(f'Measurement Likelihood running.......')
+            self.get_logger().info(f'Measurement likelihood running {measurement_probability}.......')
         return measurement_probability
 
     def particle_array_generation(self):
@@ -314,17 +314,20 @@ class ParticleFilterLocalization(Node):
 
     def simulation_lidar_measurement(self,particle, map_data):
 
-        num_beams = (self.scanner_info.get('angle_max') - self.scanner_info.get('angle_min')) / self.scanner_info.get('angle_increment')
+        angle_max = self.scanner_info.get('angle_max')
+        angle_min = self.scanner_info.get('angle_min')
+        angle_inc = self.scanner_info.get('angle_increment')
+        # if self.verbose:
+        #     self.get_logger().info('Simulation Lidar measurement running.......')
+        #     self.get_logger().info(f'angle_min, angle_max, num_beams,{angle_max},{angle_min}')
 
-        angles = np.linspace(0, 2*np.pi, num_beams, endpoint=False)
         measurements = []
+        max_range = self.scanner_info.get('range_max')
 
-        for angle in angles:
+        while angle_min <= angle_max:
             x = particle[0]
             y = particle[1]
-            theta = particle[2] + angle  # TODO: Don't know abouit; Adjust for sensor orientation
-            max_range = self.scanner_info.get('range_max')
-            min_range = self.scanner_info.get('range_min')
+            theta = particle[2] + angle_min  # TODO: Don't know abouit; Adjust for sensor orientation
 
             # Cast a ray from the sensor's position
             # Check map dimensions in map callback
@@ -342,14 +345,16 @@ class ParticleFilterLocalization(Node):
                 measurements.append(max_range)
             else:
                 measurements.append(0)  # Out of bounds
+            angle_min += angle_inc
 
         return measurements
 
     def resampling(self):
 
+        if self.verbose:
+            self.get_logger().info(f'Resampling running.......{self.particles[:,-1]}')
         indices = np.random.choice(range(self.NUM_PARTICLES),self.NUM_PARTICLES, p = self.particles[:,-1])
         self.particles = self.particles[indices]
-        self.particles[:,-1] = 1/self.NUM_PARTICLES
     
         return None
         
@@ -359,39 +364,30 @@ class ParticleFilterLocalization(Node):
         ''' call for laser scan 
             convert it into cartesion                           
             call sampling method '''
-        x_est = 0.0
-        y_est = 0.0
-        theta_est = 0.0 
+            
+        # try: 
+        if not self.map:
+            return None
+        
         if self.verbose:
-            self.get_logger().info(f'Localization loop running')
-            
-        try: 
-            if self.verbose:
-                varaince_diff = np.isclose(self.variance,0.0,0.1,0.2)
-                self.get_logger().info(f'In try loop with variance: {varaince_diff}')
-            while not np.isclose(self.variance,0.0,0.1,0.2):
+            self.get_logger().info(f'In localization loop with variance: {self.variance}')
 
-                if self.verbose:
-                    self.get_logger().info(f'Particle loop running')
+        self.motion_model_prediction(self.particles,self.time_delta)
+        self.particles = self.measurement_model_correspondance(self.particles,self.state)
+        self.resampling()
+        x_est, y_est, theta_est = np.average(self.particles[:,:-1], axis=0, weights=self.particles[:,-1])
 
-                self.particles = self.motion_model_prediction(self.particles,self.time_delta)
-                self.particles = self.measurement_model_correspondance(self.particles,self.state)
-                
-                
-                for particle in self.particles:
-                    x_est += particle[0] * particle[3]
-                    y_est += particle[1] * particle[3]
-                    theta_est += particle[2] * particle[3]
+        self.variance = np.var(self.particles[:,3])   
+        if self.verbose:
+            self.get_logger().info(f'Estimated values: {x_est},{y_est},{theta_est}') 
+            self.get_logger().info(f'Variance of the weights: {self.variance}')
+            self.get_logger().info(f'Publishing estimated pose.....')
+        
+        self.estimated_pose_publisher.publish(self.set_posestamped(self.expected_pose,[x_est,y_est,0.0],[0.0, 0.0, theta_est],self.ROBOT_FRAME))
+        self.particle_array_generation()
 
-                self.variance = np.var(self.particles[:,3])
-            
-            if self.verbose:
-                self.get_logger().info(f'Publishing estimated pose.....')
-            self.estimated_pose_publisher(self.set_posestamped(self.expected_pose,[x_est,y_est,0.0],[0.0, 0.0, theta_est],self.ROBOT_FRAME))
-            self.particle_array_generation()
-
-        except Exception as e:
-            self.get_logger().debug(f'Exception received while running localization: {e}')
+        # except Exception as e:
+        #     self.get_logger().debug(f'Exception received while running localization: {e}')
 
             
         return None
