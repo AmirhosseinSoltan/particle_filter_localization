@@ -63,6 +63,7 @@ class ParticleFilterLocalization(Node):
         self.scanner_info = {}
         self.variance = 1.0
         self.ray_step = 1.5
+        self.RESAMPLE_FRACTION = 0.2
         self.scan_ranges: np.ndarray = None
 
         # expected pose
@@ -521,7 +522,7 @@ class ParticleFilterLocalization(Node):
         return None
         
 
-    def low_variance_resample(self, resample_fraction=0.25):
+    def low_variance_resample(self, resample_fraction=0.2):
         # position_variance = np.linalg.norm(np.var(particles[:, :2], axis=1)) \
         #                         * (self.resolution) 
 
@@ -571,7 +572,7 @@ class ParticleFilterLocalization(Node):
 
         self.variance = np.var(self.particles[:,3])
         if self.variance < self.VARIANCE_THRESHOLD:
-            self.low_variance_resample()
+            self.low_variance_resample(resample_fraction=self.RESAMPLE_FRACTION)
 
         # x_est, y_est, theta_est = np.average(self.particles[:,:-1], axis=0, weights=self.particles[:,-1])
         # x_est = x_est * self.resolution + self.origin.position.x
