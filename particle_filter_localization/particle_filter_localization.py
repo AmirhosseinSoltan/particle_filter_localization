@@ -13,7 +13,7 @@ import time
 
 class ParticleFilterLocalization(Node):
     def __init__(self,
-                 particle_count: int = 10,
+                 particle_count: int = 50,
                  ) -> None:
         super().__init__(node_name="ParticleFilterLocalization")
         # For testing
@@ -32,8 +32,8 @@ class ParticleFilterLocalization(Node):
 
         # Random
         self.ERROR_MEAN = 0
-        self.ERROR_LINEAR_STD = 1.0
-        self.ERROR_ANGULAR_STD = 0.5
+        self.ERROR_LINEAR_STD = 0.1
+        self.ERROR_ANGULAR_STD = 0.1
         self.VARIANCE_THRESHOLD = 1e-3
 
         # Initial guess
@@ -73,6 +73,7 @@ class ParticleFilterLocalization(Node):
         self.variance = 2.0
         self.ray_step = 1.5
         self.RESAMPLE_FRACTION = 0.2
+        self.SCAN_EVERY = 2
         self.scan_ranges: np.ndarray = None
 
         # expected pose
@@ -324,7 +325,7 @@ class ParticleFilterLocalization(Node):
     
 
     def transform_with_homogeneous_transform(self, points, transformation_matrix):
-        points = np.hstack(points, np.ones((10, 1)))
+        points = np.hstack((points, np.ones((points.shape[0], 1))))
 
         transformed_points = (transformation_matrix @ points.T).T
         transformed_points = transformed_points[:, :-1]
@@ -403,7 +404,7 @@ class ParticleFilterLocalization(Node):
 
         measurements = self.scan_ranges
         max_range = self.scanner_info.get('range_max')
-        measurements = np.where(np.isinf(measurements), max_range, measurements)
+        measurements = np.where(measurements >= max_range, -1, measurements)
 
         for particle in particles:
             # Implement measurement likelihood calculation based on LiDAR measurements
@@ -425,17 +426,18 @@ class ParticleFilterLocalization(Node):
         # self.get_logger().info(f"particle: {particle}") 
         # self.get_logger().info(f"measurement: \n{measurement}") 
 
-        expected_measurement = self.simulation_lidar_measurement(particle, map)
+        # expected_measurement = self.simulation_lidar_measurement(particle, map)
+        measurement_probability = self.simulation_lidar_measurement_probability(particle, map, measurement)
         
         # self.get_logger().info(f"expected_measurement: \n{expected_measurement}")
         
         # Assuming Gaussian noise for simplicity
-        measurement_difference = np.sum((measurement - expected_measurement)**2)
+        # measurement_difference = np.sum((measurement - expected_measurement)**2)
         # self.get_logger().info(f"measurement_difference: {measurement_difference}")
 
         # measurement_probability = np.exp(-0.5*np.sum((measurement_difference)/self.variance))
         # measurement_probability = norm(measurement_difference,0.1).pdf(measurement)
-        measurement_probability = 1 / measurement_difference
+        # measurement_probability = 1 / measurement_difference
         # self.get_logger().info(f'Measurement likelihood: {measurement_probability}')
 
         return measurement_probability
@@ -486,12 +488,16 @@ class ParticleFilterLocalization(Node):
         #     self.get_logger().info('Simulation Lidar measurement running.......')
         #     self.get_logger().info(f'angle_min, angle_max, angle_inc,{angle_max},{angle_min},{angle_inc}')
 
+        angles = np.linspace(self.scanner_info["angle_min"], self.scanner_info["angle_max"], \
+                             self.scanner_info["num_scans"])[::-1]#[::self.SCAN_EVERY]
+
         measurements = []
 
-        for scan_index in range(np.size(self.scan_ranges)):
+        # for scan_index in range(np.size(self.scan_ranges)):
+        for theta in angles:
             x = particle[0]
             y = particle[1]
-            theta = particle[2] - (angle_max - (scan_index * angle_inc))
+            # theta = particle[2] - (angle_max - (scan_index * angle_inc))
 
             # Cast a ray from the sensor's position
             # Check map dimensions in map callback
@@ -530,6 +536,74 @@ class ParticleFilterLocalization(Node):
         measurements = np.array(measurements) * self.resolution
             
         return measurements
+    
+
+    def simulation_lidar_measurement_probability(self, particle, map_data,given_measurement):
+        angle_max = self.scanner_info.get('angle_max')
+        angle_min = self.scanner_info.get('angle_min')
+        angle_inc = self.scanner_info.get('angle_increment')
+        max_range = self.scanner_info.get('range_max') / self.resolution
+        num_scans = self.scanner_info.get("num_scans")
+        q = 1.0
+        sigma = 0.1
+
+        # if self.verbose:
+        #     self.get_logger().info('Simulation Lidar measurement running.......')
+        #     self.get_logger().info(f'angle_min, angle_max, angle_inc,{angle_max},{angle_min},{angle_inc}')
+
+        angles = np.linspace(self.scanner_info["angle_min"], self.scanner_info["angle_max"], \
+                             self.scanner_info["num_scans"])[::-1]#[::self.SCAN_EVERY]
+
+        measurements = []
+
+        # for scan_index in range(np.size(self.scan_ranges)):
+        for index, theta in enumerate(angles):
+            scan_index = index #* self.SCAN_EVERY
+        # for scan_index in range(np.size(self.scan_ranges)):
+            x = particle[0]
+            y = particle[1]
+            # theta = particle[2] - (angle_max - (scan_index * angle_inc))
+
+            # Cast a ray from the sensor's position
+            # Check map dimensions in map callback
+            if not np.isclose(given_measurement[scan_index], max_range):
+                while True:
+                    # print(f"x: {x}, y: {y}")
+                    distance = np.linalg.norm([x - particle[0], y - particle[1]])
+
+                    # the point is out of map bounds
+                    if  0 > x or 0 > y  or x > map_data.shape[0] or y > map_data.shape[1]:
+                        # print("Miss!")
+                        measurements.append(max_range)
+                        break
+                    # If no obstacle is hit within the sensor's range, set measurement to max range
+
+                    # Hit an obstacle 
+                    elif map_data[int(x), int(y)] > 0:
+                        # print("Hit!")   
+                        measurements.append(min(distance, max_range))
+                        break
+
+                    else:
+                        # Update test map with trace
+                        self.test_state[int(x), int(y)] = 0
+
+                        pass
+
+        
+                    x += self.ray_step * np.cos(theta)
+                    y += self.ray_step * np.sin(theta)
+            else:
+                measurements.append(-1)
+
+            if measurements[-1] != -1:
+                diff_dist = given_measurement[scan_index] - (measurements[-1]* self.resolution)
+
+                q = q * ( (1/ np.sqrt(2*np.pi * (sigma**2))) * np.exp(-(0.5* diff_dist**2) / sigma**2))
+            else:
+                pass
+
+        return q
     
 
     def resampling(self):
