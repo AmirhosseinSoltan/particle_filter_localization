@@ -97,8 +97,8 @@ class ParticleFilterLocalization(Node):
 
         # Setup subscribers and publishers
         if init_ros:
-            # self.tf_buffer = tf2_ros.Buffer()
-            # self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+            self.tf_buffer = tf2_ros.Buffer()
+            self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
             # Command input subscriber
             self.cmd_vel_subscriber = self.create_subscription(
@@ -280,8 +280,10 @@ class ParticleFilterLocalization(Node):
 
         if not self.lidar_init:
 
-            # self.tf_lidar_wrt_robot: TransformStamped = self.tf_buffer.lookup_transform(
-                                                    # self.ROBOT_FRAME, self.SCANNER_FRAME, rclpy.time.Time())
+            tf_lidar_wrt_robot: TransformStamped = self.tf_buffer.lookup_transform(
+                                                    self.ROBOT_FRAME, self.SCANNER_FRAME, \
+                                                    rclpy.time.Time(), timeout=rclpy.time.Duration(seconds=2.0))
+            self.tf_lidar_wrt_robot_matrix = self.get_homogeneous_transformation_from_transform(tf_lidar_wrt_robot)
             
             self.scanner_info.update({
                 "frame_id" : msg.header.frame_id,
@@ -292,19 +294,59 @@ class ParticleFilterLocalization(Node):
                 "angle_increment" : msg.angle_increment,
                 "num_scans": len(msg.ranges),
                 })
-            
-            # scan_cartesian = self.convert_scan_to_cartesian(msg.ranges)
-            # scan_cartesian = self.transform_coordinates(self.ROBOT_FRAME, \
-            #                                 self.SCANNER_FRAME, \
-            #                                 scan_cartesian)
-            # self.scanner_info.update({"range_data" : scan_cartesian})
 
             self.lidar_init = True
             self.get_logger().info(f"LiDAR parameters initialized: \n{self.scanner_info}")
 
         self.scan_ranges = np.array(msg.ranges)
 
+        self.scan_cartesian = self.convert_scan_to_cartesian(self.scan_ranges)
+
+        self.scan_cartesian = self.transform_with_homogeneous_transform(self.scan_cartesian, \
+                                                                        self.tf_lidar_wrt_robot_matrix)
+
         return None
+    
+
+    def convert_scan_to_cartesian(self, scan_ranges: np.ndarray):
+        '''
+        Converts scan point to the cartesian coordinate system
+        '''
+        scan_points = np.zeros((len(scan_ranges), 3))
+
+        thetas = np.linspace(self.scanner_info["angle_min"], self.scanner_info["angle_max"], self.scanner_info["num_scans"])
+
+        scan_points[:, 0] = scan_ranges * np.cos(thetas)
+        scan_points[:, 1] = scan_ranges * np.sin(thetas)
+        scan_points[:, 2] = 0.0
+
+        return scan_points
+    
+
+    def transform_with_homogeneous_transform(self, points, transformation_matrix):
+        points = np.hstack(points, np.ones((10, 1)))
+
+        transformed_points = (transformation_matrix @ points.T).T
+        transformed_points = transformed_points[:, :-1]
+
+        return transformed_points
+
+
+    def get_homogeneous_transformation_from_transform(self, transform:TransformStamped):
+        '''
+        Return the equivalent homogeneous transform of a TransformStamped object
+        '''
+        transformation_matrix = tf.quaternion_matrix([
+                                    transform.transform.rotation.x,
+                                    transform.transform.rotation.y,
+                                    transform.transform.rotation.z,
+                                    transform.transform.rotation.w,
+                                    ])
+        transformation_matrix[0,-1] = transform.transform.translation.x
+        transformation_matrix[1,-1] = transform.transform.translation.y
+        transformation_matrix[2,-1] = transform.transform.translation.z
+
+        return transformation_matrix
 
 
     def set_posestamped(self, pose:PoseStamped, position, orientation_euler, frame_id):
