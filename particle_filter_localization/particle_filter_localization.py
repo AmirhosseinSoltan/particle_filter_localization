@@ -1,15 +1,20 @@
+import time
+
 import numpy as np
 import rclpy
 import tf2_ros
-from geometry_msgs.msg import PoseArray, TransformStamped, Twist, PoseStamped, Pose, PoseWithCovarianceStamped
+import tf_transformations as tf
+from geometry_msgs.msg import (Pose, PoseArray, PoseStamped,
+                               PoseWithCovarianceStamped, TransformStamped,
+                               Twist)
 from nav_msgs.msg import OccupancyGrid, Odometry
 from rclpy.node import Node
-from sensor_msgs.msg import LaserScan
 from scipy.stats import norm
-import tf_transformations as tf
-from tf_transformations import quaternion_from_euler, euler_from_quaternion, euler_from_matrix, quaternion_matrix, euler_matrix
+from sensor_msgs.msg import LaserScan
+from tf_transformations import (euler_from_matrix, euler_from_quaternion,
+                                euler_matrix, quaternion_from_euler,
+                                quaternion_matrix)
 
-import time
 
 class ParticleFilterLocalization(Node):
     def __init__(self,
