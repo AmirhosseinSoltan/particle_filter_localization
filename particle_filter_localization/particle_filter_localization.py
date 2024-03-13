@@ -2,12 +2,12 @@ import numpy as np
 import rclpy
 import tf2_ros
 from geometry_msgs.msg import PoseArray, TransformStamped, Twist, PoseStamped, Pose, PoseWithCovarianceStamped
-from nav_msgs.msg import OccupancyGrid
+from nav_msgs.msg import OccupancyGrid, Odometry
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
 from scipy.stats import norm
 import tf_transformations as tf
-from tf_transformations import quaternion_from_euler, euler_from_quaternion
+from tf_transformations import quaternion_from_euler, euler_from_quaternion, euler_from_matrix, quaternion_matrix, euler_matrix
 
 import time
 
@@ -18,6 +18,7 @@ class ParticleFilterLocalization(Node):
         super().__init__(node_name="ParticleFilterLocalization")
         # For testing
         init_ros = True
+        self.use_odom = True
         self.verbose = True
         self.lidar_init = False
 
@@ -32,25 +33,30 @@ class ParticleFilterLocalization(Node):
 
         # Random
         self.ERROR_MEAN = 0
-        self.ERROR_LINEAR_STD = 1.0
-        self.ERROR_ANGULAR_STD = np.pi/4
-        self.VARIANCE_THRESHOLD = 1e-4
+        self.ERROR_LINEAR_STD = 0.01
+        self.ERROR_ANGULAR_STD = np.pi/64
+        self.VARIANCE_THRESHOLD = 1e-6
 
         # Initial guess
         self.use_initial_guess = True
         # Initial guess mean in x, y, theta
-        self.initial_particle_guess = np.array([0.0, 0.0, 0.0])
+        self.initial_particle_guess = np.array([
+            0.0, 0.0, 0.0
+            ])
         # Standard deviations for sampling around initial guess
-        self.initial_particle_std = np.array([5.0, 5.0, np.pi/4])
+        self.initial_particle_std = np.array([
+            self.ERROR_LINEAR_STD, self.ERROR_LINEAR_STD, self.ERROR_ANGULAR_STD,
+            ])
 
         self.CMD_VEL_TOPIC = "/cmd_vel"
         self.MAP_TOPIC = "/map_loaded"
         self.SCAN_TOPIC = "/scan"
         self.POSE_TOPIC = "/pose"
+        self.ODOM_TOPIC = "/odom"
         self.PARTICLE_ARRAY_TOPIC = "/particle_cloud"
         self.ESTIMATED_POSE_TOPIC = "/pose_estimated"
         self.ROBOT_FRAME = "base_link"
-        self.ODOM = "odom"
+        self.ODOM_TOPIC = "odom"
         self.MAP_FRAME = "map"
         self.SCANNER_FRAME = "base_laser_front_link"
         
@@ -72,7 +78,7 @@ class ParticleFilterLocalization(Node):
         self.scanner_info = {}
         self.variance = 2.0
 
-        self.ray_step = 1.5
+        self.ray_step = 1.0
 
         self.RESAMPLE_FRACTION = 0.2
         self.SCAN_EVERY = 2
@@ -88,6 +94,12 @@ class ParticleFilterLocalization(Node):
         # Robot pose from SLAM
         self.robot_pose = np.zeros(3)
         self.robot_pose_particle = np.zeros(3)
+
+        # Odometry
+        self.odometry_position = np.zeros(3)
+        self.odometry_orientation = np.identity(3)
+        self.previous_odometry_position = np.zeros(3)
+        self.previous_odometry_orientation = np.identity(3)
         
         # Map
         self.map = None
@@ -105,9 +117,9 @@ class ParticleFilterLocalization(Node):
 
             # Command input subscriber
             self.cmd_vel_subscriber = self.create_subscription(
-                Twist,
-                self.CMD_VEL_TOPIC,
-                self.cmd_vel_callback,
+                Odometry if self.use_odom else Twist,
+                self.ODOM_TOPIC if self.use_odom else self.CMD_VEL_TOPIC,
+                self.odom_callback if self.use_odom else self.cmd_vel_callback,
                 10,
                 )
 
@@ -134,7 +146,7 @@ class ParticleFilterLocalization(Node):
             #     self.pose_callback,
             #     10,
             #     )
-        
+
             # Particle publisher (for display in RViz)
             self.particle_array_publisher = self.create_publisher(
                 PoseArray,
@@ -232,14 +244,32 @@ class ParticleFilterLocalization(Node):
         self.control_input[0] = msg.linear.x * 8
         self.control_input[1] = msg.linear.y * 8
 
-        self.control_input[2] = msg.angular.z / 2
+        self.control_input[2] = msg.angular.z / 4
         self.start_localization = True
+
+        return None
+    
+
+    def odom_callback(self, msg: Odometry) -> None:
+        self.odometry_position = np.array([
+            msg.pose.pose.position.x,
+            msg.pose.pose.position.y,
+            msg.pose.pose.position.z,
+        ])
+        self.odometry_orientation = np.array(quaternion_matrix([
+            msg.pose.pose.orientation.x,
+            msg.pose.pose.orientation.y,
+            msg.pose.pose.orientation.z,
+            msg.pose.pose.orientation.w,
+        ])[:3, :3])
+
+        # print(f"Odom update: position {self.odometry_position}")
 
         return None
 
 
     def map_callback(self, msg: OccupancyGrid) -> None:
-        self.get_logger().info(f'I am recieving the map...')
+        # self.get_logger().info(f'I am recieving the map...')
 
         self.map = np.array(msg.data, dtype=np.int8)
         self.width = msg.info.width
@@ -279,7 +309,7 @@ class ParticleFilterLocalization(Node):
         self.particles[:,-1] = 1/self.NUM_PARTICLES
         
         if self.verbose:
-            self.get_logger().info(f'Sample particles initialized\n{self.particles}')
+            self.get_logger().info(f'Particles initialized\n{self.particles}')
 
         self.previous_prediction_time = time.time()
 
@@ -304,12 +334,13 @@ class ParticleFilterLocalization(Node):
                                   n,
                                   ) -> np.ndarray:
         x = np.random.normal(initial_particle_guess[0], initial_particle_std[0], n)
-        x = x - (self.origin.position.x / self.resolution)
         y = np.random.normal(initial_particle_guess[1], initial_particle_std[1], n)
-        y = y - (self.origin.position.y / self.resolution)
         theta = np.random.normal(initial_particle_guess[2], initial_particle_std[2], n)
         # Wrapping between -180 to 180
         theta = (theta + np.pi) % (2 * np.pi) - np.pi
+
+        x = x - (self.origin.position.x / self.resolution)
+        y = y - (self.origin.position.y / self.resolution)
 
         samples = np.vstack((x, y ,theta)).T
 
@@ -392,24 +423,54 @@ class ParticleFilterLocalization(Node):
 
     def motion_model_prediction(self,
                                 particles: np.ndarray,
-                                time_delta: float,
+                                time_delta: float = None,
                                 ) -> np.ndarray:
         # Update position of particles
-        particles[:, 0] += (self.control_input[0] * np.cos(particles[:, 2]) \
-                        + self.control_input[1] * np.sin(particles[:, 2])) \
-                        * time_delta \
-                        + np.random.normal(self.ERROR_MEAN, self.ERROR_LINEAR_STD, self.NUM_PARTICLES)
 
-        particles[:, 1] += (self.control_input[1] * np.cos(particles[:, 2]) \
-                        + self.control_input[0] * np.sin(particles[:, 2])) \
-                        * time_delta \
-                        + np.random.normal(self.ERROR_MEAN, self.ERROR_LINEAR_STD, self.NUM_PARTICLES)
+        if self.use_odom:
+            translation = self.odometry_position - self.previous_odometry_position
+            rotation = np.linalg.pinv(self.previous_odometry_orientation) @ self.odometry_orientation 
 
-        # Update heading of particles
-        particles[:, 2] += self.control_input[2] * time_delta \
-                        + np.random.normal(self.ERROR_MEAN, self.ERROR_ANGULAR_STD, self.NUM_PARTICLES)
+            current_orientation_matrices = np.array(
+                [euler_matrix(0.0, 0.0, particle[2])[:3, :3] for particle in self.particles]
+                )
 
-        return particles
+            rotated_orientation_matrices = current_orientation_matrices @ rotation
+            rotated_angles = np.array(
+                [tf.euler_from_matrix(rotated_orientation_matrix) for rotated_orientation_matrix in rotated_orientation_matrices]
+                )
+            
+            particles[:, :2] += ((translation[:2] + \
+                                  np.random.normal(self.ERROR_MEAN, self.ERROR_LINEAR_STD, (self.NUM_PARTICLES, 2))) \
+                                / self.resolution)
+            particles[:, 2] = rotated_angles[:, 2] + np.random.normal(self.ERROR_MEAN, self.ERROR_ANGULAR_STD, self.NUM_PARTICLES)
+
+            self.previous_odometry_position = self.odometry_position.copy()
+            self.previous_odometry_orientation = self.odometry_orientation.copy()
+
+            return particles
+
+        else:
+            # Needs to be separate
+            if np.isclose(np.linalg.norm(self.control_input), 0.0):
+
+                return particles
+
+            particles[:, 0] += (self.control_input[0] * np.cos(particles[:, 2]) \
+                            + self.control_input[1] * np.sin(particles[:, 2])) \
+                            * time_delta \
+                            + np.random.normal(self.ERROR_MEAN, self.ERROR_LINEAR_STD, self.NUM_PARTICLES)
+
+            particles[:, 1] += (self.control_input[1] * np.cos(particles[:, 2]) \
+                            + self.control_input[0] * np.sin(particles[:, 2])) \
+                            * time_delta \
+                            + np.random.normal(self.ERROR_MEAN, self.ERROR_LINEAR_STD, self.NUM_PARTICLES)
+
+            # Update heading of particles
+            particles[:, 2] += self.control_input[2] * time_delta \
+                            + np.random.normal(self.ERROR_MEAN, self.ERROR_ANGULAR_STD, self.NUM_PARTICLES)
+
+            return particles
 
 
     def resample_particles(self) -> None:   
@@ -473,9 +534,10 @@ class ParticleFilterLocalization(Node):
 
         measurements = np.zeros((num_scans))
 
-        for index, theta in enumerate(angles):
+        for index, scan_theta in enumerate(angles):
             x = particle[0]
             y = particle[1]
+            theta = particle[2] - scan_theta
 
             # Cast a ray from the sensor's position
             # Check map dimensions in map callback
@@ -528,15 +590,20 @@ class ParticleFilterLocalization(Node):
             expected_measurements = self.simulate_lidar_measurement(particle, map)
 
             diff_mask = (measurements != -1) & (expected_measurements != -1)
-            diff = np.mean(np.linalg.norm(measurements[diff_mask] - expected_measurements[diff_mask]))
+            diff = np.linalg.norm(measurements[diff_mask] - expected_measurements[diff_mask])
 
-            # particles[index, -1] *= np.exp(-diff)
-            particles[index, -1] *= 1/diff
+            if np.abs(diff) < 1e-10:
+                particles[index, -1] *= 1e10
+            else:
+                # particles[index, -1] *= np.exp(-diff)
+                particles[index, -1] *= 1/diff
 
-            with np.printoptions(suppress=True):
-                print(f"particle: {particle} | diff: {diff} | weight: {particles[index, -1]}")
+            # with np.printoptions(suppress=True):
+                # print(f"particle: {particle} | diff: {diff} | weight: {particles[index, -1]}")
 
         particles[:, -1] = self.normalize_weights(particles[:, -1])
+
+        # print(f"particles: \n{particles}")
 
         return particles
     
@@ -551,6 +618,8 @@ class ParticleFilterLocalization(Node):
                               resample_fraction=0.2,
                               ) -> None:
         particles_to_resample = int(self.NUM_PARTICLES * resample_fraction)
+
+        print(f"estimated_particle: {self.estimated_particle}")
 
         samples = self.sample_n_normal_particles(self.estimated_particle[:3], self.initial_particle_std, particles_to_resample)
 
@@ -590,8 +659,8 @@ class ParticleFilterLocalization(Node):
         self.publish_estimated_pose()
 
         self.variance = np.var(self.particles[:, -1])
-        if self.variance < self.VARIANCE_THRESHOLD:
-            self.low_variance_resample()
+        # if self.variance < self.VARIANCE_THRESHOLD:
+        #     self.low_variance_resample()
 
         # Create and publish particle array
         self.particle_array_generation(self.particles)
@@ -607,6 +676,8 @@ class ParticleFilterLocalization(Node):
         
         self.estimated_particle[0] = self.estimated_particle[0] * self.resolution + self.origin.position.x
         self.estimated_particle[1] = self.estimated_particle[1] * self.resolution + self.origin.position.y
+
+        # TODO: Add base_laser_front_link to base_link transform
 
         estimated_pose: PoseStamped = self.set_posestamped(self.expected_pose, 
                                          [self.estimated_particle[0], self.estimated_particle[1], self.origin.position.z], 
