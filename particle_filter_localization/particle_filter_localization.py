@@ -166,10 +166,41 @@ class ParticleFilterLocalization(Node):
             self.particle_array_publisher = None
             self.estimated_pose_publisher = None
         
-        # TODO: transform scan points
             
     
-    def pose_callback(self, msg: PoseWithCovarianceStamped):
+    def scan_callback(self, msg: LaserScan) -> None:
+
+        if not self.lidar_init:
+
+            tf_lidar_wrt_robot: TransformStamped = self.tf_buffer.lookup_transform(
+                                                    self.ROBOT_FRAME, self.SCANNER_FRAME, \
+                                                    rclpy.time.Time(), timeout=rclpy.time.Duration(seconds=2.0))
+            self.tf_lidar_wrt_robot_matrix = self.get_homogeneous_transformation_from_transform(tf_lidar_wrt_robot)
+            
+            self.scanner_info.update({
+                "frame_id" : msg.header.frame_id,
+                "angle_min" : msg.angle_min,
+                "angle_max" : msg.angle_max,
+                "range_min" : msg.range_min,
+                "range_max" : msg.range_max,
+                "angle_increment" : msg.angle_increment,
+                "num_scans": len(msg.ranges),
+                })
+
+            self.lidar_init = True
+            self.get_logger().info(f"LiDAR parameters initialized: \n{self.scanner_info}")
+
+        self.scan_ranges = np.array(msg.ranges)
+
+        self.scan_cartesian = self.convert_scan_to_cartesian(self.scan_ranges)
+
+        self.scan_cartesian = self.transform_with_homogeneous_transform(self.scan_cartesian, \
+                                                                        self.tf_lidar_wrt_robot_matrix)
+
+        return None
+            
+    
+    def pose_callback(self, msg: PoseWithCovarianceStamped) -> None:
         self.robot_pose[0] = msg.pose.pose.position.x
         self.robot_pose[1] = msg.pose.pose.position.y
         self.robot_pose[2] = euler_from_quaternion(
@@ -184,9 +215,12 @@ class ParticleFilterLocalization(Node):
         self.robot_pose_particle[0] = (self.robot_pose[0] - self.origin.position.x) / self.resolution
         self.robot_pose_particle[1] = (self.robot_pose[1] - self.origin.position.y) / self.resolution 
         self.robot_pose_particle[2] = self.robot_pose[2]
-
+        
+        # This initializes particles at the current pose; only for testing motion model
         # self.particles = np.zeros((1, 4))
         # self.particles[0, :-1] = self.robot_pose_particle
+
+        return None
  
 
     def cmd_vel_callback(self, msg: Twist) -> None:
@@ -229,32 +263,15 @@ class ParticleFilterLocalization(Node):
         return None
 
 
-    def sampler_initializer (self, 
-                             initial_particle_guess: np.ndarray = None,
-                             initial_particle_std: np.ndarray = None,
-                             ) -> None:
-
-        # x = np.linspace(0.0,self.width,num=round(self.width/self.resolution))
-        # y = np.linspace(0.0 , self.height, num= round(self.height/self.resolution))
-        # nx,ny = np.meshgrid(x,y)
-        # grid_points = np.dstack((nx,ny))
-        # shape = np.shape(grid_points)
-        # samples = grid_points.reshape(shape[0]*shape[1],2)
-        # theta = theta[np.newaxis].T
-
+    def sampler_initializer(self, 
+                            initial_particle_guess: np.ndarray = None,
+                            initial_particle_std: np.ndarray = None,
+                            ) -> None:
         if initial_particle_guess is None or initial_particle_std is None:
             samples = self.sample_n_particles(self.NUM_PARTICLES)
 
         else:
-            x = np.random.normal(initial_particle_guess[0], initial_particle_std[0], self.NUM_PARTICLES)
-            x = x - (self.origin.position.x / self.resolution)
-            y = np.random.normal(initial_particle_guess[1], initial_particle_std[1], self.NUM_PARTICLES)
-            y = y - (self.origin.position.y / self.resolution)
-            theta = np.random.normal(initial_particle_guess[2], initial_particle_std[2], self.NUM_PARTICLES)
-            # Wrapping between -180 to 180
-            theta = (theta + np.pi) % (2 * np.pi) - np.pi
-
-            samples = np.vstack((x, y ,theta)).T
+            samples = self.sample_n_normal_particles(initial_particle_guess, initial_particle_std, self.NUM_PARTICLES)
 
         self.particles[:,:-1] = samples
         self.particles[:,-1] = 1/self.NUM_PARTICLES
@@ -267,7 +284,9 @@ class ParticleFilterLocalization(Node):
         return None
 
 
-    def sample_n_particles(self, n):
+    def sample_n_particles(self, 
+                           n,
+                           ) -> np.ndarray:
         x = np.random.uniform(0.0, self.width, n)
         y = np.random.uniform(0.0, self.height, n)
         theta = np.random.uniform(-np.pi, np.pi, size=n)
@@ -275,41 +294,30 @@ class ParticleFilterLocalization(Node):
         samples = np.vstack((x, y, theta)).T
 
         return samples
-
-    
-    def scan_callback(self, msg: LaserScan) -> None:
-
-        if not self.lidar_init:
-
-            tf_lidar_wrt_robot: TransformStamped = self.tf_buffer.lookup_transform(
-                                                    self.ROBOT_FRAME, self.SCANNER_FRAME, \
-                                                    rclpy.time.Time(), timeout=rclpy.time.Duration(seconds=2.0))
-            self.tf_lidar_wrt_robot_matrix = self.get_homogeneous_transformation_from_transform(tf_lidar_wrt_robot)
-            
-            self.scanner_info.update({
-                "frame_id" : msg.header.frame_id,
-                "angle_min" : msg.angle_min,
-                "angle_max" : msg.angle_max,
-                "range_min" : msg.range_min,
-                "range_max" : msg.range_max,
-                "angle_increment" : msg.angle_increment,
-                "num_scans": len(msg.ranges),
-                })
-
-            self.lidar_init = True
-            self.get_logger().info(f"LiDAR parameters initialized: \n{self.scanner_info}")
-
-        self.scan_ranges = np.array(msg.ranges)
-
-        self.scan_cartesian = self.convert_scan_to_cartesian(self.scan_ranges)
-
-        self.scan_cartesian = self.transform_with_homogeneous_transform(self.scan_cartesian, \
-                                                                        self.tf_lidar_wrt_robot_matrix)
-
-        return None
     
 
-    def convert_scan_to_cartesian(self, scan_ranges: np.ndarray):
+    def sample_n_normal_particles(self, 
+                                  initial_particle_guess, 
+                                  initial_particle_std, 
+                                  n,
+                                  ) -> np.ndarray:
+        x = np.random.normal(initial_particle_guess[0], initial_particle_std[0], n)
+        x = x - (self.origin.position.x / self.resolution)
+        y = np.random.normal(initial_particle_guess[1], initial_particle_std[1], n)
+        y = y - (self.origin.position.y / self.resolution)
+        theta = np.random.normal(initial_particle_guess[2], initial_particle_std[2], n)
+        # Wrapping between -180 to 180
+        theta = (theta + np.pi) % (2 * np.pi) - np.pi
+
+        samples = np.vstack((x, y ,theta)).T
+
+        return samples
+    
+
+    # Methods for converting scan to cartesian and transforming to robot frame
+    def convert_scan_to_cartesian(self, 
+                                  scan_ranges: np.ndarray,
+                                  ) -> np.ndarray:
         '''
         Converts scan point to the cartesian coordinate system
         '''
@@ -324,7 +332,10 @@ class ParticleFilterLocalization(Node):
         return scan_points
     
 
-    def transform_with_homogeneous_transform(self, points, transformation_matrix):
+    def transform_with_homogeneous_transform(self, 
+                                             points: np.ndarray, 
+                                             transformation_matrix: np.ndarray,
+                                             ) -> np.ndarray:
         points = np.hstack((points, np.ones((points.shape[0], 1))))
 
         transformed_points = (transformation_matrix @ points.T).T
@@ -333,7 +344,9 @@ class ParticleFilterLocalization(Node):
         return transformed_points
 
 
-    def get_homogeneous_transformation_from_transform(self, transform:TransformStamped):
+    def get_homogeneous_transformation_from_transform(self, 
+                                                      transform: TransformStamped,
+                                                      ) -> np.ndarray:
         '''
         Return the equivalent homogeneous transform of a TransformStamped object
         '''
@@ -350,7 +363,12 @@ class ParticleFilterLocalization(Node):
         return transformation_matrix
 
 
-    def set_posestamped(self, pose:PoseStamped, position, orientation_euler, frame_id):
+    def set_posestamped(self, 
+                        pose: PoseStamped, 
+                        position, 
+                        orientation_euler, 
+                        frame_id,
+                        ) -> PoseStamped:
         '''
         Sets the fields of a PoseStamped object
         '''
@@ -367,10 +385,8 @@ class ParticleFilterLocalization(Node):
         pose.pose.orientation.z = orientation_quat[2]
         pose.pose.orientation.w = orientation_quat[3]
 
-        # if self.verbose:
-        #     self.get_logger().info(f"pose set: {pose}")
-
         return pose
+
 
     def motion_model_prediction(self,
                                 particles: np.ndarray,
@@ -391,12 +407,126 @@ class ParticleFilterLocalization(Node):
         particles[:, 2] += self.control_input[2] * time_delta \
                         + np.random.normal(self.ERROR_MEAN, self.ERROR_ANGULAR_STD, self.NUM_PARTICLES)
 
-        # if self.verbose:
-        #     self.get_logger().info(f'Motion model running\n{particles}')
-
         return particles
 
 
+    def resample_particles(self) -> None:        
+        indices: np.ndarray = np.random.choice(range(self.NUM_PARTICLES), 
+                                               self.NUM_PARTICLES, 
+                                               p = self.particles[:,-1])
+        self.particles: np.ndarray = self.particles[indices]
+    
+        return None
+
+
+    def particle_array_generation(self, 
+                                  particles: np.ndarray,
+                                  ) -> None:
+        """
+        Create and publish particle array
+        """
+
+        particle_array = PoseArray()
+                
+        current_time = self.get_clock().now().seconds_nanoseconds()
+        particle_array.header.stamp.sec = current_time[0]
+        particle_array.header.stamp.nanosec = current_time[1]
+
+        particle_array.header.frame_id = self.MAP_FRAME
+
+        for particle in particles:
+            pose = Pose()
+            pose.position.x = particle[0] * self.resolution + self.origin.position.x
+            pose.position.y = particle[1] * self.resolution + self.origin.position.y
+            pose.position.z = 0.0
+
+            orientation_quat = quaternion_from_euler(*[0.0,0.0,particle[2]])
+
+            pose.orientation.x = orientation_quat[0]
+            pose.orientation.y = orientation_quat[1]
+            pose.orientation.z = orientation_quat[2]
+            pose.orientation.w = orientation_quat[3]
+
+            particle_array.poses.append(pose)
+        
+        self.particle_array_publisher.publish(particle_array)
+
+
+    def low_variance_resample(self, 
+                              resample_fraction=0.2,
+                              ) -> None:
+        particles_to_resample = int(self.NUM_PARTICLES * resample_fraction)
+
+        samples = self.sample_n_particles(particles_to_resample)
+
+        self.particles[:particles_to_resample,:3] = samples
+        self.particles[:, 3] = self.particles[:, 3] / np.sum(self.particles[:, 3])
+
+        return None
+
+
+    def publish_estimated_pose(self) -> None:
+        x_est, y_est, theta_est = np.average(self.particles[:,:-1], 
+                                             axis=0, 
+                                             weights=self.particles[:,-1],
+                                             )
+        x_est = x_est * self.resolution + self.origin.position.x
+        y_est = y_est * self.resolution + self.origin.position.y
+        z_est = self.origin.position.z
+
+        estimated_pose: PoseStamped = self.set_posestamped(self.expected_pose, 
+                                         [x_est,y_est,z_est], 
+                                         [0.0, 0.0, theta_est], 
+                                         self.MAP_FRAME,
+                                         )
+
+        self.estimated_pose_publisher.publish(estimated_pose)
+
+
+    def publish_map(self, map_array: np.ndarray) -> None:
+        map_msg = OccupancyGrid()
+
+        map_msg.info.resolution = self.resolution
+        map_msg.info.width = self.width
+        map_msg.info.height = self.height
+
+        map_msg.info.origin.position.x = self.origin.position.x
+        map_msg.info.origin.position.y = self.origin.position.y
+
+        map_msg.header.stamp = self.timestamp
+        map_msg.header.frame_id = self.MAP_FRAME
+
+        map_msg.data = np.ravel(map_array, order='F').tolist()
+
+        self.map_publisher.publish(map_msg)
+
+
+    def localization_loop(self) -> None:
+        if (self.map is None) or (self.scan_ranges is None):
+            self.get_logger().info(f"Waiting for map or scan")
+
+            return None
+        
+        if self.verbose:
+            self.get_logger().info(f'Current weight variance: {self.variance} over {self.NUM_PARTICLES} particles')
+
+        # Motion prediction model
+        current_time = time.time()
+        time_step = current_time - self.previous_prediction_time
+        self.motion_model_prediction(self.particles, time_step)
+        self.previous_prediction_time = current_time
+
+        # Test map - shows traces made by particles
+        self.test_state = np.ones_like(self.state) * 100
+
+        # Create and publish particle array
+        self.particle_array_generation(self.particles)
+
+        return None
+
+
+
+    #####
     def measurement_model_correspondance(self,
                                          particles: np.ndarray,
                                          map: np.ndarray,
@@ -441,40 +571,6 @@ class ParticleFilterLocalization(Node):
         # self.get_logger().info(f'Measurement likelihood: {measurement_probability}')
 
         return measurement_probability
-
-
-    def particle_array_generation(self, particles):
-
-        # if self.verbose:
-        #     self.get_logger().info(f'Particle array getting generated.....')
-
-        particle_array = PoseArray()
-                
-        current_time = self.get_clock().now().seconds_nanoseconds()
-        particle_array.header.stamp.sec = current_time[0]
-        particle_array.header.stamp.nanosec = current_time[1]
-
-        particle_array.header.frame_id = self.MAP_FRAME
-
-        for particle in particles:
-            pose = Pose()
-            pose.position.x = particle[0] * self.resolution + self.origin.position.x
-            pose.position.y = particle[1] * self.resolution + self.origin.position.y
-            pose.position.z = 0.0
-
-            orientation_quat = quaternion_from_euler(*[0.0,0.0,particle[2]])
-
-            pose.orientation.x = orientation_quat[0]
-            pose.orientation.y = orientation_quat[1]
-            pose.orientation.z = orientation_quat[2]
-            pose.orientation.w = orientation_quat[3]
-
-            particle_array.poses.append(pose)
-
-        # if self.verbose:
-        #     self.get_logger().info(f"pose array set: {particle_array}")
-        
-        self.particle_array_publisher.publish(particle_array)
 
 
     def simulation_lidar_measurement(self, particle, map_data):
@@ -604,44 +700,9 @@ class ParticleFilterLocalization(Node):
                 pass
 
         return q
-    
-
-    def resampling(self):
-        # if self.verbose:
-        #     self.get_logger().info(f'Resampling running.......{self.particles[:,-1]}')
-        
-        indices = np.random.choice(range(self.NUM_PARTICLES),self.NUM_PARTICLES, p = self.particles[:,-1])
-        self.particles = self.particles[indices]
-    
-        return None
-        
-
-    def low_variance_resample(self, resample_fraction=0.2):
-        # position_variance = np.linalg.norm(np.var(particles[:, :2], axis=1)) \
-        #                         * (self.resolution) 
-
-        # self.get_logger().info(f"position_variance: {position_variance}")
-        particles_to_resample = int(self.NUM_PARTICLES * resample_fraction)
-
-        samples = self.sample_n_particles(particles_to_resample)
-
-        self.particles[:particles_to_resample,:3] = samples
-        self.particles[:, 3] = self.particles[:, 3] / np.sum(self.particles[:, 3])
 
 
-    def publish_estimated_pose(self):
-
-        x_est, y_est, theta_est = np.average(self.particles[:,:-1], axis=0, weights=self.particles[:,-1])
-        x_est = x_est * self.resolution + self.origin.position.x
-        y_est = y_est * self.resolution + self.origin.position.y
-        z_est = self.origin.position.z
-
-        curr_pose = self.set_posestamped(self.expected_pose,[x_est,y_est,z_est],[0.0, 0.0, theta_est],self.MAP_FRAME)
-
-        self.estimated_pose_publisher.publish(curr_pose)
-
-
-    def localization_loop(self) -> None:
+    def _localization_loop(self) -> None:
 
         ''' call for laser scan 
             convert it into cartesion                           
@@ -673,7 +734,7 @@ class ParticleFilterLocalization(Node):
         # Publish test map
         self.publish_map(self.test_state)
 
-        self.resampling()
+        self.resample_particles()
         self.publish_estimated_pose()
 
         # self.low_variance_resample(resample_fraction=self.RESAMPLE_FRACTION)  
@@ -690,24 +751,6 @@ class ParticleFilterLocalization(Node):
 
 
         return None
-    
-
-    def publish_map(self, map_array: np.ndarray) -> None:
-        map_msg = OccupancyGrid()
-
-        map_msg.info.resolution = self.resolution
-        map_msg.info.width = self.width
-        map_msg.info.height = self.height
-
-        map_msg.info.origin.position.x = self.origin.position.x
-        map_msg.info.origin.position.y = self.origin.position.y
-
-        map_msg.header.stamp = self.timestamp
-        map_msg.header.frame_id = self.MAP_FRAME
-
-        map_msg.data = np.ravel(map_array, order='F').tolist()
-
-        self.map_publisher.publish(map_msg)
 
 
 
@@ -715,17 +758,15 @@ def main(args=None):
     rclpy.init(args=args)
 
     node = ParticleFilterLocalization()
-    rclpy.spin(node)
-    rclpy.shutdown()
 
-    # try:
-    #     while rclpy.ok():
-    #         rclpy.spin_once(node)
+    try:
+        while rclpy.ok():
+            rclpy.spin_once(node)
 
-    # except Exception as e:
-    #     print(e)
+    except Exception as e:
+        print(e)
 
-    #     rclpy.shutdown()
+        rclpy.shutdown()
 
 
 if __name__ == '__main__':
