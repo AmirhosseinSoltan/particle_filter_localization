@@ -82,7 +82,7 @@ class ParticleFilterLocalization(Node):
         self.RAY_STEP = 1.0
 
         self.RESAMPLE_FRACTION = 0.2
-        self.SCAN_EVERY = 2
+        self.SCAN_EVERY = 6
         self.scan_ranges: np.ndarray = None
 
         # Odometry
@@ -113,8 +113,8 @@ class ParticleFilterLocalization(Node):
 
         # Setup subscribers and publishers
         if init_ros:
-            self.tf_buffer = tf2_ros.Buffer(cache_time=rclpy.duration.Duration(seconds=10.0))
-            self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self, spin_thread=True, qos=10)
+            # self.tf_buffer = tf2_ros.Buffer(cache_time=rclpy.duration.Duration(seconds=10.0))
+            # self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self, spin_thread=True, qos=10)
 
             # Command input subscriber
             if self.use_odom:
@@ -189,19 +189,26 @@ class ParticleFilterLocalization(Node):
             self.particle_array_publisher = None
             self.estimated_pose_publisher = None
 
+        # Wait for map load
+        # time.sleep(5)
+
 
 
     def scan_callback(self, msg: LaserScan) -> None:
 
         if not self.lidar_init:
-            tf_lidar_wrt_robot: TransformStamped = self.tf_buffer.lookup_transform(
-                                                    self.ROBOT_FRAME, self.SCANNER_FRAME, \
-                                                    rclpy.time.Time(), timeout=rclpy.time.Duration(seconds=10.0))
-            self.tf_lidar_wrt_robot_matrix = self.get_homogeneous_transformation_from_transform(tf_lidar_wrt_robot)
+            # tf_lidar_wrt_robot: TransformStamped = self.tf_buffer.lookup_transform(
+            #                                         self.ROBOT_FRAME, self.SCANNER_FRAME, \
+            #                                         rclpy.time.Time(), timeout=rclpy.time.Duration(seconds=10.0))
+            # self.tf_lidar_wrt_robot_matrix = self.get_homogeneous_transformation_from_transform(tf_lidar_wrt_robot)
+            # self.lidar_to_robot_transformation = np.linalg.pinv(self.tf_lidar_wrt_robot_matrix)
+
+            self.tf_lidar_wrt_robot_matrix = np.identity(4)
+            self.tf_lidar_wrt_robot_matrix[0, -1] = 0.45
             self.lidar_to_robot_transformation = np.linalg.pinv(self.tf_lidar_wrt_robot_matrix)
 
-            del self.tf_listener
-            del self.tf_buffer
+            # del self.tf_listener
+            # del self.tf_buffer
 
             self.scanner_info.update({
                 "frame_id" : msg.header.frame_id,
@@ -537,7 +544,7 @@ class ParticleFilterLocalization(Node):
         range_max = self.scanner_info.get("range_max")
         num_scans = self.scanner_info.get("num_scans")
 
-        angles = np.linspace(angle_min, angle_max, num_scans)[::-1]#[::self.SCAN_EVERY]
+        angles = np.linspace(angle_min, angle_max, num_scans)[::-1][::self.SCAN_EVERY]
 
         particle_matrix = tf.euler_matrix(0.0, 0.0, particle[2])
         particle_matrix[:2, -1] = particle[:2]
@@ -549,7 +556,7 @@ class ParticleFilterLocalization(Node):
             tf.euler_from_matrix(transformed_particle_matrix)[2],
         ])
 
-        measurements = np.zeros((num_scans))
+        measurements = np.zeros_like(angles)
 
         for index, scan_theta in enumerate(angles):
             x = transformed_particle[0]
@@ -600,6 +607,7 @@ class ParticleFilterLocalization(Node):
                                          ) -> np.ndarray:
 
         measurements = measurements.copy()
+        measurements = measurements[::self.SCAN_EVERY]
         range_max = self.scanner_info.get("range_max")
 
         measurements[measurements > range_max] = -1
